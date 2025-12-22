@@ -26,7 +26,12 @@
 
 #include "config.h"
 
+#ifndef SHA1DC_NO_STANDARD_INCLUDES
 #include <stdint.h>
+#endif
+#ifdef SHA1DC_CUSTOM_INCLUDE_UBC_CHECK_C
+#include SHA1DC_CUSTOM_INCLUDE_UBC_CHECK_C
+#endif
 #include "ubc_check.h"
 
 static const uint32_t DV_I_43_0_bit 	= (uint32_t)(1) << 0;
@@ -363,3 +368,7 @@ if (mask) {
 
 	dvmask[0]=mask;
 }
+
+#ifdef SHA1DC_CUSTOM_TRAILING_INCLUDE_UBC_CHECK_C
+#include SHA1DC_CUSTOM_TRAILING_INCLUDE_UBC_CHECK_C
+#endif
