@@ -5,6 +5,11 @@
 * https://opensource.org/licenses/MIT
 ***/
 
+#include "config.h"
+#include "sha1.h"
+#include "ubc_check.h"
+#include "simd/simd_config.h"
+
 #ifndef SHA1DC_NO_STANDARD_INCLUDES
 #include <string.h>
 #include <memory.h>
@@ -21,6 +26,28 @@
 
 #ifndef SHA1DC_INIT_SAFE_HASH_DEFAULT
 #define SHA1DC_INIT_SAFE_HASH_DEFAULT 1
+#endif
+
+#define sha1_bswap32(x) \
+	{x = ((x << 8) & 0xFF00FF00) | ((x >> 8) & 0xFF00FF); x = (x << 16) | (x >> 16);}
+#define sha1_loadbyte(m, t, s) (((uint32_t)(((const unsigned char*)(m+t))[s]))&0xFF)
+
+/* ensure that exactly one of SHA1DC_HAVE_{LITTLEENDIAN,BIGENDIAN,UNKNOWNENDIAN} is defined */
+#ifdef SHA1DC_HAVE_LITTLEENDIAN
+#define SHA1DC_ENDIANNESS "little_endian"
+#define sha1_load(m, t, dest)  { dest = m[t]; sha1_bswap32(dest); }
+#endif
+#ifdef SHA1DC_HAVE_BIGENDIAN
+#define SHA1DC_ENDIANNESS "big_endian"
+#define sha1_load(m, t, dest)  { dest = m[t]; }
+#endif
+#ifdef SHA1DC_HAVE_UNKNOWNENDIAN
+#define SHA1DC_ENDIANNESS "unknown_endian"
+#define sha1_load(m, t, dest)  { dest = (sha1_loadbyte(m,t,0)<<24)^(sha1_loadbyte(m,t,1)<<16)^(sha1_loadbyte(m,t,2)<<8)^sha1_loadbyte(m,t,3); }
+#endif
+#ifndef sha1_load
+#pragma message "Endianness not properly configured"
+#define sha1_load(m, t, dest)  { dest = (sha1_loadbyte(m,t,0)<<24)^(sha1_loadbyte(m,t,1)<<16)^(sha1_loadbyte(m,t,2)<<8)^sha1_loadbyte(m,t,3); }
 #endif
 
 #include "sha1.h"
@@ -133,18 +160,9 @@
 #define rotate_right(x,n) (((x)>>(n))|((x)<<(32-(n))))
 #define rotate_left(x,n)  (((x)<<(n))|((x)>>(32-(n))))
 
-#define sha1_bswap32(x) \
-	{x = ((x << 8) & 0xFF00FF00) | ((x >> 8) & 0xFF00FF); x = (x << 16) | (x >> 16);}
-
 #define sha1_mix(W, t)  (rotate_left(W[t - 3] ^ W[t - 8] ^ W[t - 14] ^ W[t - 16], 1))
 
-#ifdef SHA1DC_BIGENDIAN
-	#define sha1_load(m, t, temp)  { temp = m[t]; }
-#else
-	#define sha1_load(m, t, temp)  { temp = m[t]; sha1_bswap32(temp); }
-#endif
-
-#define sha1_store(W, t, x)	*(volatile uint32_t *)&W[t] = x
+#define sha1_store(W, t, x) { *(volatile uint32_t *)&W[t] = x; }
 
 #define sha1_f1(b,c,d) ((d)^((b)&((c)^(d))))
 #define sha1_f2(b,c,d) ((b)^(c)^(d))
@@ -1718,6 +1736,14 @@ static void sha1_process(SHA1_CTX* ctx, const uint32_t block[16])
 	uint32_t ubc_dv_mask[DVMASKSIZE] = { 0xFFFFFFFF };
 	uint32_t ihvtmp[5];
 
+#ifdef SHA1DC_HAVE_SIMD
+	if (ctx->ubc_check == 0 && ctx->safe_hash == 0 && ctx->simd > 0)
+	{
+		sha1_process_simd(ctx, block);
+		return;
+	}
+#endif
+
 	ctx->ihv1[0] = ctx->ihv[0];
 	ctx->ihv1[1] = ctx->ihv[1];
 	ctx->ihv1[2] = ctx->ihv[2];
@@ -1748,7 +1774,20 @@ static void sha1_process(SHA1_CTX* ctx, const uint32_t block[16])
 					if ((0 == ((ihvtmp[0] ^ ctx->ihv[0]) | (ihvtmp[1] ^ ctx->ihv[1]) | (ihvtmp[2] ^ ctx->ihv[2]) | (ihvtmp[3] ^ ctx->ihv[3]) | (ihvtmp[4] ^ ctx->ihv[4])))
 						|| (ctx->reduced_round_coll && 0==((ctx->ihv1[0] ^ ctx->ihv2[0]) | (ctx->ihv1[1] ^ ctx->ihv2[1]) | (ctx->ihv1[2] ^ ctx->ihv2[2]) | (ctx->ihv1[3] ^ ctx->ihv2[3]) | (ctx->ihv1[4] ^ ctx->ihv2[4]))))
 					{
+						/*
+						fprintf(stderr, "block offset: %d dv id: %d test step: %d\n", (uint32_t)(ctx->total - 64), i, sha1_dvs[i].testt);
+						fprintf(stderr, "ihvtmp[0] = 0x%08x ihvtmp[1] = 0x%08x ihvtmp[2] = 0x%08x ihvtmp[3] = 0x%08x ihvtmp[4] = 0x%08x\n", ihvtmp[0], ihvtmp[1], ihvtmp[2], ihvtmp[3], ihvtmp[4]);
+						fprintf(stderr, "ctx->ihv[0] = 0x%08x ctx->ihv[1] = 0x%08x ctx->ihv[2] = 0x%08x ctx->ihv[3] = 0x%08x ctx->ihv[4] = 0x%08x\n", ctx->ihv[0], ctx->ihv[1], ctx->ihv[2], ctx->ihv[3], ctx->ihv[4]);
+						fprintf(stderr, "ctx->ihv1[0] = 0x%08x ctx->ihv1[1] = 0x%08x ctx->ihv1[2] = 0x%08x ctx->ihv1[3] = 0x%08x ctx->ihv1[4] = 0x%08x\n", ctx->ihv1[0], ctx->ihv1[1], ctx->ihv1[2], ctx->ihv1[3], ctx->ihv1[4]);
+						fprintf(stderr, "ctx->ihv2[0] = 0x%08x ctx->ihv2[1] = 0x%08x ctx->ihv2[2] = 0x%08x ctx->ihv2[3] = 0x%08x ctx->ihv2[4] = 0x%08x\n", ctx->ihv2[0], ctx->ihv2[1], ctx->ihv2[2], ctx->ihv2[3], ctx->ihv2[4]);
+						*/
+
 						ctx->found_collision = 1;
+
+						if (ctx->callback != NULL)
+						{
+							ctx->callback(ctx->total - 64, ctx->ihv1, ctx->ihv2, ctx->m1, ctx->m2, ctx->callback_data);
+						}
 
 						if (ctx->safe_hash)
 						{
@@ -1778,6 +1817,12 @@ void SHA1DCInit(SHA1_CTX* ctx)
 	ctx->detect_coll = 1;
 	ctx->reduced_round_coll = 0;
 	ctx->callback = NULL;
+	ctx->callback_data = NULL;
+#ifdef SHA1DC_HAVE_SIMD
+	ctx->simd = SHA1DC_get_simd();
+#else
+	ctx->simd = -1;
+#endif
 }
 
 void SHA1DCSetSafeHash(SHA1_CTX* ctx, int safehash)
@@ -1813,9 +1858,10 @@ void SHA1DCSetDetectReducedRoundCollision(SHA1_CTX* ctx, int reduced_round_coll)
 		ctx->reduced_round_coll = 0;
 }
 
-void SHA1DCSetCallback(SHA1_CTX* ctx, collision_block_callback callback)
+void SHA1DCSetCallback(SHA1_CTX* ctx, collision_block_callback callback, void* callback_data)
 {
 	ctx->callback = callback;
+	ctx->callback_data = callback_data;
 }
 
 void SHA1DCUpdate(SHA1_CTX* ctx, const char* buf, size_t len)

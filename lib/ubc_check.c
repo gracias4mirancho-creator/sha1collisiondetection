@@ -24,6 +24,8 @@
 // ubc_check has been verified against ubc_check_verify using the 'ubc_check_test' program in the tools section
 */
 
+#include "config.h"
+
 #ifndef SHA1DC_NO_STANDARD_INCLUDES
 #include <stdint.h>
 #endif
